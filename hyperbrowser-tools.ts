@@ -1,187 +1,69 @@
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-// TODO: Replace with Hyperbrowser imports
-// import { HyperAgent } from '@hyperbrowser/hyperagent';
-import { existsSync, mkdirSync } from 'fs';
-import { spawn, ChildProcess } from 'child_process';
-import { join } from 'path';
-import { findLocalChrome, takeScreenshot } from './browser-utils.js';
+// Local headful HyperAgent (opens visible Chrome)
+// Reference: https://www.hyperbrowser.ai/docs/agents/hyperagent
+// @ts-ignore - package may not ship full TS types yet
+import { HyperAgent } from '@hyperbrowser/agent';
 import dotenv from 'dotenv';
 dotenv.config();
 
-// Lazy loading of Hyperbrowser instance
-let hyperbrowserInstance: any | null = null;
-let currentPage: any = null;
-let chromeProcess: ChildProcess | null = null;
-let tempUserDataDir: string | null = null;
+// HyperAgent singleton (local, headful)
+let agent: any | null = null;
 
-async function getHyperbrowser() {
-  if (!hyperbrowserInstance) {
-    //console.log('[Hyperbrowser] Initializing...');
-    const chromePath = findLocalChrome();
-    //console.log(`[Hyperbrowser] Found Chrome at: ${chromePath}`);
-
-    if (!chromePath) {
-      throw new Error(
-        `Could not find local Chrome installation. Please install Chrome or Chromium for your platform:\n` +
-        `- macOS: Install Google Chrome from https://www.google.com/chrome/\n` +
-        `- Windows: Install Google Chrome from https://www.google.com/chrome/\n` +
-        `- Linux: Run 'sudo apt install google-chrome-stable' or 'sudo apt install chromium-browser'`
-      );
+async function ensureAgent() {
+  if (!agent) {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      throw new Error('Missing ANTHROPIC_API_KEY for Claude');
     }
-
-    const cdpPort = 9222;
-    //console.log(`[Hyperbrowser] CDP Port: ${cdpPort}`);
-
-    // Use a persistent directory in the current working directory for Chrome automation
-    tempUserDataDir = join(process.cwd(), '.chrome-profile');
-
-    // Launch Chrome with remote debugging enabled
-    //console.log('[Hyperbrowser] Launching Chrome with remote debugging...');
-    //console.log(`[Hyperbrowser] User data dir: ${tempUserDataDir}`);
-
-    const chromeArgs = [
-      `--remote-debugging-port=${cdpPort}`,
-      `--user-data-dir=${tempUserDataDir}`,
-    ];
-
-    //console.log(`[Hyperbrowser] Command: ${chromePath} ${chromeArgs.join(' ')}`);
-
-    chromeProcess = spawn(chromePath, chromeArgs, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: false,
-    });
-
-    chromeProcess.stdout?.on('data', (data) => {
-      const msg = data.toString().trim();
-      if (msg.includes('DevTools listening')) {
-        //console.log(`[Chrome]: ${msg}`);
-      }
-    });
-
-    chromeProcess.stderr?.on('data', (data) => {
-      const msg = data.toString().trim();
-      if (msg.includes('DevTools listening')) {
-        //console.log(`[Chrome]: ${msg}`);
-      }
-    });
-
-    chromeProcess.on('error', (err) => {
-      console.error(`[Hyperbrowser] Failed to launch Chrome: ${err}`);
-    });
-
-    // Wait for Chrome to start and the debugging port to be ready
-    //console.log('[Hyperbrowser] Waiting for Chrome CDP to be ready...');
-    let chromeReady = false;
-    for (let i = 0; i < 50; i++) {
-      try {
-        // Try both 127.0.0.1 and localhost
-        const response = await fetch(`http://127.0.0.1:${cdpPort}/json/version`);
-        if (response.ok) {
-          //console.log(`[Hyperbrowser] Chrome CDP is ready (attempt ${i + 1})`);
-          chromeReady = true;
-          break;
-        }
-      } catch (error) {
-        if (i % 10 === 0 && i > 0) {
-          //console.log(`[Hyperbrowser] Still waiting for CDP... (attempt ${i + 1}/50)`);
-        }
-      }
-      await new Promise(resolve => setTimeout(resolve, 300));
-    }
-
-    if (!chromeReady) {
-      throw new Error(`Chrome failed to start with remote debugging on port ${cdpPort}`);
-    }
-
-    // Connect to Chrome via CDP
-    //console.log('[Hyperbrowser] Connecting to Chrome via CDP...');
-    // TODO: Replace with Hyperbrowser initialization
-    hyperbrowserInstance = null; // new HyperAgent({
-      env: "LOCAL",
-      verbose: 0,
-      enableCaching: true,
-      modelName: "anthropic/claude-haiku-4-5-20251001",
-      localBrowserLaunchOptions: {
-        cdpUrl: `http://localhost:${cdpPort}`,
+    // Use Claude via Anthropic in local headful HyperAgent
+    const modelId = process.env.ANTHROPIC_MODEL || 'claude-3-7-sonnet-latest';
+    agent = new HyperAgent({
+      llm: {
+        provider: 'anthropic',
+        model: modelId,
       },
     });
-    // await hyperbrowserInstance.init();
-    //console.log('[Hyperbrowser] Connected successfully');
-    // currentPage = hyperbrowserInstance.page;
-
-    // Wait for browser context to be fully ready by checking if we can access the page
-    let retries = 0;
-    const maxRetries = 30;
-    while (retries < maxRetries) {
-      try {
-        // Try to check if page is accessible and ready
-        await currentPage.evaluate(() => document.readyState);
-        // If we get here, the page is ready
-        break;
-      } catch (error) {
-        // Page not ready yet, wait and retry
-        await new Promise(resolve => setTimeout(resolve, 100));
-        retries++;
-      }
+    if (agent.initialize) {
+      await agent.initialize();
     }
-
-    if (retries >= maxRetries) {
-      throw new Error("Browser failed to become ready within timeout");
-    }
-
-    // Configure download behavior via CDP
-    const downloadsPath = join(process.cwd(), 'agent', 'downloads');
-    if (!existsSync(downloadsPath)) {
-      mkdirSync(downloadsPath, { recursive: true });
-    }
-
-    const context = currentPage.context();
-    const client = await context.newCDPSession(currentPage);
-    await client.send("Browser.setDownloadBehavior", {
-      behavior: "allow",
-      downloadPath: downloadsPath,
-      eventsEnabled: true,
-    });
   }
-  return { hyperbrowser: hyperbrowserInstance, page: currentPage };
+  return agent;
 }
 
-async function closeHyperbrowser() {
-  if (hyperbrowserInstance) {
-    // await hyperbrowserInstance.close();
-    hyperbrowserInstance = null;
-    currentPage = null;
+async function closeAgent() {
+  if (agent && agent.closeAgent) {
+    try { await agent.closeAgent(); } catch {}
   }
-  if (chromeProcess) {
-    chromeProcess.kill();
-    chromeProcess = null;
-  }
-  // Note: We keep the temp user data directory for reuse in future sessions
-  tempUserDataDir = null;
+  agent = null;
 }
 
-// Create the custom MCP server
+// Export initialization function for pre-warming
+export async function initializeAgent() {
+  return await ensureAgent();
+}
+
+// Create the Hyperbrowser MCP server (keeping the name for compatibility)
 const hyperbrowserServer = createSdkMcpServer({
   name: "hyperbrowser",
   version: "1.0.0",
   tools: [
     tool(
       "navigate",
-      "Navigate to a URL in the browser. Will save a screenshot of the page after the navigation is completed.",
+      "Navigate to a URL using local headful HyperAgent (visible Chrome).",
       {
         url: z.string().describe("The URL to navigate to"),
       },
       async (args) => {
         try {
-          const { page } = await getHyperbrowser();
-          await page.goto(args.url);
-          const screenshotPath = await takeScreenshot(page);
+          const a = await ensureAgent();
+          const result = await a.executeTask(
+            `Go to ${args.url}. After it loads, write one plain sentence summarizing the page. Output ONLY the sentence. No JSON, no markdown, no preface.`
+          );
           return {
             content: [
               {
                 type: "text",
-                text: `Successfully navigated to ${args.url}\nScreenshot saved to ${screenshotPath}`,
+                text: `Navigated to ${args.url}\n\n${typeof result === 'string' ? result.trim() : ''}`,
               },
             ],
           };
@@ -200,20 +82,21 @@ const hyperbrowserServer = createSdkMcpServer({
 
     tool(
       "act",
-      "Perform an action on the page using natural language (e.g., 'click the login button', 'fill in the email field with test@example.com'). Will save a screenshot of the page after the action is performed.",
+      "Perform an action using local headful HyperAgent (e.g., 'click the login button', 'type \"hello\" and press enter')",
       {
         action: z.string().describe("Natural language description of the action to perform"),
       },
       async (args) => {
         try {
-          const { page } = await getHyperbrowser();
-          await page.act(args.action);
-          const screenshotPath = await takeScreenshot(page);
+          const a = await ensureAgent();
+          const result = await a.executeTask(
+            `Perform the following action precisely: ${args.action}. When complete, reply with a short confirmation in plain text (max one sentence). Do not include JSON, markdown, or extra metadata.`
+          );
           return {
             content: [
               {
                 type: "text",
-                text: `Successfully performed action: ${args.action}\nScreenshot saved to ${screenshotPath}`,
+                text: typeof result === 'string' ? result.trim() : 'Action completed.',
               },
             ],
           };
@@ -232,41 +115,22 @@ const hyperbrowserServer = createSdkMcpServer({
 
     tool(
       "extract",
-      "Extract structured data from the current page using a schema",
+      "Extract structured data using local headful HyperAgent",
       {
-        instruction: z.string().describe("Natural language description of what to extract"),
-        schema: z.record(z.string(), z.enum(["string", "number", "boolean"])).describe("Schema definition as an object where keys are field names and values are types ('string', 'number', or 'boolean')"),
+        instruction: z.string().describe("What data to extract (e.g., 'extract all article titles', 'get all links')"),
       },
       async (args) => {
         try {
-          const { page } = await getHyperbrowser();
-
-          // Convert simple schema to Zod schema
-          const zodSchema: Record<string, any> = {};
-          for (const [key, type] of Object.entries(args.schema)) {
-            switch (type) {
-              case "string":
-                zodSchema[key] = z.string();
-                break;
-              case "number":
-                zodSchema[key] = z.number();
-                break;
-              case "boolean":
-                zodSchema[key] = z.boolean();
-                break;
-            }
-          }
-
-          const result = await page.extract({
-            instruction: args.instruction,
-            schema: z.object(zodSchema),
-          });
+          const a = await ensureAgent();
+          const result = await a.executeTask(
+            `Extract data as requested: ${args.instruction}. Return ONLY plain text values, one item per line, with no JSON, no markdown, and no extra commentary.`
+          );
 
           return {
             content: [
               {
                 type: "text",
-                text: JSON.stringify(result, null, 2),
+                text: typeof result === 'string' ? result : '',
               },
             ],
           };
@@ -285,19 +149,22 @@ const hyperbrowserServer = createSdkMcpServer({
 
     tool(
       "observe",
-      "Discover available actions on the page (e.g., 'find all buttons', 'find submit buttons')",
+      "Discover what's on the page using local headful HyperAgent",
       {
-        query: z.string().describe("Natural language query to discover elements"),
+        query: z.string().describe("What to observe (e.g., 'find all buttons', 'list all links')"),
       },
       async (args) => {
         try {
-          const { page } = await getHyperbrowser();
-          const actions = await page.observe(args.query);
+          const a = await ensureAgent();
+          const result = await a.executeTask(
+            `Observe and answer: ${args.query}. Reply concisely in plain text only. Do not include JSON or markdown.`
+          );
+
           return {
             content: [
               {
                 type: "text",
-                text: JSON.stringify(actions, null, 2),
+                text: typeof result === 'string' ? result : '',
               },
             ],
           };
@@ -316,18 +183,17 @@ const hyperbrowserServer = createSdkMcpServer({
 
     tool(
       "screenshot",
-      "Take a screenshot of the current page.",
-      {
-      },
-      async (args) => {
+      "Ask local headful HyperAgent to capture a screenshot and confirm",
+      {},
+      async () => {
         try {
-          const { page } = await getHyperbrowser();
-          const screenshotPath = await takeScreenshot(page);
+          const a = await ensureAgent();
+          const result = await a.executeTask('Take a screenshot of the current page and confirm');
           return {
             content: [
               {
                 type: "text",
-                text: `Screenshot saved to ${screenshotPath}`,
+                text: typeof result === 'string' ? result : JSON.stringify(result),
               },
             ],
           };
@@ -345,17 +211,48 @@ const hyperbrowserServer = createSdkMcpServer({
     ),
 
     tool(
-      "close_browser",
-      "Close the browser and cleanup resources",
-      {},
-      async () => {
+      "batch",
+      "Execute multiple browser actions in a single call for speed (e.g., 'navigate to X, then click Y, then extract Z')",
+      {
+        steps: z.string().describe("Natural language description of multiple actions to perform sequentially"),
+      },
+      async (args) => {
         try {
-          await closeHyperbrowser();
+          const a = await ensureAgent();
+          const result = await a.executeTask(args.steps);
           return {
             content: [
               {
                 type: "text",
-                text: "Browser closed successfully",
+                text: typeof result === 'string' ? result.trim() : JSON.stringify(result),
+              },
+            ],
+          };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error executing batch: ${error instanceof Error ? error.message : String(error)}`,
+              },
+            ],
+          };
+        }
+      }
+    ),
+
+    tool(
+      "close_browser",
+      "Close the local HyperAgent and cleanup resources",
+      {},
+      async () => {
+        try {
+          await closeAgent();
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Local HyperAgent closed successfully",
               },
             ],
           };
@@ -376,12 +273,12 @@ const hyperbrowserServer = createSdkMcpServer({
 
 // Handle cleanup on process exit
 process.on("SIGINT", async () => {
-  await closeHyperbrowser();
+  await closeAgent();
   process.exit(0);
 });
 
 process.on("SIGTERM", async () => {
-  await closeHyperbrowser();
+  await closeAgent();
   process.exit(0);
 });
 
